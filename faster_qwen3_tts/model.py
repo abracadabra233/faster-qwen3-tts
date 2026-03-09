@@ -212,6 +212,7 @@ class FasterQwen3TTS:
         if voice_clone_prompt is not None:
             return self._resolve_precomputed_voice_clone_prompt(
                 input_ids=input_ids,
+                ref_text=ref_text,
                 voice_clone_prompt=voice_clone_prompt,
             )
 
@@ -226,6 +227,7 @@ class FasterQwen3TTS:
     def _resolve_precomputed_voice_clone_prompt(
         self,
         input_ids,
+        ref_text: str,
         voice_clone_prompt: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], list, bool]:
         required_keys = ("ref_spk_embedding",)
@@ -236,34 +238,57 @@ class FasterQwen3TTS:
                 f"Expected keys: {list(required_keys)}"
             )
 
-        for key in required_keys:
+        list_keys = ("ref_spk_embedding", "x_vector_only_mode", "icl_mode", "ref_code")
+        for key in list_keys:
+            if key not in voice_clone_prompt:
+                continue
             value = voice_clone_prompt[key]
             if not isinstance(value, list) or len(value) != len(input_ids):
                 raise ValueError(
                     f"voice_clone_prompt[{key!r}] must be a list with length {len(input_ids)}"
                 )
 
-        if "icl_mode" in voice_clone_prompt and any(bool(v) for v in voice_clone_prompt["icl_mode"]):
-            raise ValueError(
-                "voice_clone_prompt currently supports x_vector_only prompts only; icl_mode=True is not supported"
-            )
-        if "x_vector_only_mode" in voice_clone_prompt and not all(bool(v) for v in voice_clone_prompt["x_vector_only_mode"]):
-            raise ValueError(
-                "voice_clone_prompt currently supports x_vector_only prompts only; x_vector_only_mode must be True"
-            )
-        if "ref_code" in voice_clone_prompt and any(v is not None for v in voice_clone_prompt["ref_code"]):
-            raise ValueError(
-                "voice_clone_prompt currently supports x_vector_only prompts only; ref_code must be None"
-            )
+        xvec_modes = voice_clone_prompt.get("x_vector_only_mode", [True] * len(input_ids))
+        if "icl_mode" in voice_clone_prompt:
+            icl_modes = [bool(v) for v in voice_clone_prompt["icl_mode"]]
+            for i, (xvec_mode, icl_mode) in enumerate(zip(xvec_modes, icl_modes)):
+                if bool(xvec_mode) == bool(icl_mode):
+                    raise ValueError(
+                        f"voice_clone_prompt has inconsistent mode flags at index {i}: "
+                        "x_vector_only_mode and icl_mode must be opposites"
+                    )
+        else:
+            icl_modes = [not bool(v) for v in xvec_modes]
+
+        ref_codes = voice_clone_prompt.get("ref_code", [None] * len(input_ids))
+        for i, (xvec_mode, icl_mode, ref_code) in enumerate(zip(xvec_modes, icl_modes, ref_codes)):
+            if bool(xvec_mode) and ref_code is not None:
+                raise ValueError(
+                    f"voice_clone_prompt index {i}: ref_code must be None in x_vector_only mode"
+                )
+            if bool(icl_mode) and ref_code is None:
+                raise ValueError(
+                    f"voice_clone_prompt index {i}: ref_code is required in ICL mode"
+                )
 
         vcp = dict(
-            ref_code=[None] * len(input_ids),
+            ref_code=ref_codes,
             ref_spk_embedding=voice_clone_prompt["ref_spk_embedding"],
-            x_vector_only_mode=[True] * len(input_ids),
-            icl_mode=[False] * len(input_ids),
+            x_vector_only_mode=[bool(v) for v in xvec_modes],
+            icl_mode=[bool(v) for v in icl_modes],
         )
-        ref_ids = [None] * len(input_ids)
-        using_icl_mode = False
+        using_icl_mode = any(vcp["icl_mode"])
+
+        if using_icl_mode:
+            if not ref_text:
+                raise ValueError(
+                    "ref_text is required when voice_clone_prompt uses ICL mode."
+                )
+            ref_texts = [self.model._build_ref_text(ref_text)]
+            ref_id = self.model._tokenize_texts(ref_texts)[0]
+            ref_ids = [ref_id if is_icl else None for is_icl in vcp["icl_mode"]]
+        else:
+            ref_ids = [None] * len(input_ids)
 
         return vcp, ref_ids, using_icl_mode
 
@@ -337,8 +362,10 @@ class FasterQwen3TTS:
                 When False, the full reference audio codec tokens are included in context (ICL mode).
             voice_clone_prompt: Optional precomputed prompt dict from
                 `create_voice_clone_prompt`/`_prompt_items_to_voice_clone_prompt`.
-                When provided, `xvec_only` is ignored. This path supports x-vector-only
-                prompts (`ref_spk_embedding`) and ignores `ref_text`.
+                When provided, `xvec_only` is ignored. This path supports both:
+                x-vector-only prompts (`ref_spk_embedding` only) and ICL prompts
+                (`ref_spk_embedding` + `ref_code` + mode flags). `ref_text` is ignored
+                for x-vector-only and required for ICL.
         """
         input_texts = [self.model._build_assistant_text(text)]
         input_ids = self.model._tokenize_texts(input_texts)
@@ -679,8 +706,9 @@ class FasterQwen3TTS:
             non_streaming_mode: Match upstream non-streaming prompt layout. Default True for better non-streaming quality.
             voice_clone_prompt: Optional precomputed voice clone prompt dict. When provided,
                 `xvec_only` is ignored and prompt extraction from `ref_audio` is skipped.
-                This path supports x-vector-only prompts (`ref_spk_embedding`) and
-                ignores `ref_text`.
+                This path supports x-vector-only prompts (`ref_spk_embedding` only)
+                and ICL prompts (`ref_spk_embedding` + `ref_code` + mode flags).
+                `ref_text` is ignored for x-vector-only and required for ICL.
 
         Returns:
             Tuple of ([audio_waveform], sample_rate)
@@ -804,8 +832,9 @@ class FasterQwen3TTS:
             parity_mode: When True, disables CUDA graphs and uses dynamic cache streaming.
             voice_clone_prompt: Optional precomputed voice clone prompt dict. When provided,
                 `xvec_only` is ignored and prompt extraction from `ref_audio` is skipped.
-                This path supports x-vector-only prompts (`ref_spk_embedding`) and
-                ignores `ref_text`.
+                This path supports x-vector-only prompts (`ref_spk_embedding` only)
+                and ICL prompts (`ref_spk_embedding` + `ref_code` + mode flags).
+                `ref_text` is ignored for x-vector-only and required for ICL.
 
         Yields:
             Tuple of (audio_chunk_numpy, sample_rate, timing_dict)

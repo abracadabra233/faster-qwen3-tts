@@ -449,8 +449,10 @@ audio_list, sr = model.generate_voice_clone(
 )
 ```
 
-When `voice_clone_prompt` is provided, prompt extraction from `ref_audio` is skipped and
-`ref_text` is ignored. Precomputed prompts currently support x-vector-only mode.
+When `voice_clone_prompt` is provided, prompt extraction from `ref_audio` is skipped.
+For x-vector-only prompts, `ref_text` is ignored.
+For ICL precomputed prompts, pass `x_vector_only_mode=[False]`, `icl_mode=[True]`,
+and a non-`None` `ref_code`, and keep `ref_text` populated.
 
 ## License
 
