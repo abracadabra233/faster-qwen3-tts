@@ -388,7 +388,7 @@ class FasterQwen3TTS:
         ref_audio: Optional[Union[str, Path]] = None,
         ref_text: str = "",
         language: str = "English",
-        xvec_only: bool = True,
+        xvec_only: bool = False,
         non_streaming_mode: bool = False,
         append_silence: bool = True,
         voice_clone_prompt: Optional[Union[Dict[str, Any], List[Any]]] = None,
@@ -397,10 +397,11 @@ class FasterQwen3TTS:
         """Prepare inputs for generation (shared by streaming and non-streaming).
 
         Args:
-            xvec_only: When True (default), use only the speaker embedding (x-vector) for voice
+            xvec_only: When True, use only the speaker embedding (x-vector) for voice
                 cloning instead of the full ICL acoustic prompt. This prevents the model from
                 continuing the reference audio's last phoneme and allows natural language switching.
-                When False, the full reference audio codec tokens are included in context (ICL mode).
+                Default False to match upstream ICL behavior, where the full reference
+                audio codec tokens are included in context.
             voice_clone_prompt: Optional precomputed prompt dict from
                 `create_voice_clone_prompt`/`_prompt_items_to_voice_clone_prompt`.
                 When provided, `xvec_only` is ignored. This path supports both:
@@ -425,6 +426,13 @@ class FasterQwen3TTS:
             append_silence=append_silence,
             voice_clone_prompt=voice_clone_prompt,
         )
+
+        if instruct and not using_icl_mode:
+            logger.warning(
+                "Base-model instruct with x-vector-only voice cloning is experimental and "
+                "may not match upstream behavior. Prefer xvec_only=False (ICL mode) when "
+                "using instruct for voice cloning."
+            )
 
         m = self.model.model
 
@@ -728,8 +736,8 @@ class FasterQwen3TTS:
         top_p: float = 1.0,
         do_sample: bool = True,
         repetition_penalty: float = 1.05,
-        xvec_only: bool = True,
-        non_streaming_mode: bool = True,
+        xvec_only: bool = False,
+        non_streaming_mode: bool = False,
         append_silence: bool = True,
         instruct: Optional[str] = None,
         voice_clone_prompt: Optional[Union[Dict[str, Any], List[Any]]] = None,
@@ -749,10 +757,12 @@ class FasterQwen3TTS:
             top_p: Top-p (nucleus) sampling
             do_sample: Whether to sample
             repetition_penalty: Repetition penalty
-            xvec_only: When True (default), use only the speaker embedding for voice cloning.
+            xvec_only: When True, use only the speaker embedding for voice cloning.
                 This prevents phoneme bleed-through from the reference and allows clean
-                language switching. Set to False for full ICL mode (reference audio in context).
-            non_streaming_mode: Match upstream non-streaming prompt layout. Default True for better non-streaming quality.
+                language switching. Default False to match upstream ICL behavior
+                (reference audio in context).
+            non_streaming_mode: Match upstream text-feeding layout. Default False to match
+                upstream step-by-step text feeding during decode.
             voice_clone_prompt: Optional precomputed voice clone prompt dict. When provided,
                 `xvec_only` is ignored and prompt extraction from `ref_audio` is skipped.
                 This path supports x-vector-only prompts (`ref_spk_embedding` only)
@@ -760,6 +770,7 @@ class FasterQwen3TTS:
                 `ref_text` is ignored for x-vector-only and required for ICL.
             instruct: Optional instruction to guide generation style/dialect (e.g.
                 "请用纯正广东话朗读"). Prepended as a user turn before the TTS assistant turn.
+                Experimental for x-vector-only voice cloning; prefer `xvec_only=False`.
 
         Returns:
             Tuple of ([audio_waveform], sample_rate)
@@ -851,8 +862,8 @@ class FasterQwen3TTS:
         do_sample: bool = True,
         repetition_penalty: float = 1.05,
         chunk_size: int = 12,
-        xvec_only: bool = True,
-        non_streaming_mode: bool = True,
+        xvec_only: bool = False,
+        non_streaming_mode: bool = False,
         append_silence: bool = True,
         parity_mode: bool = False,
         instruct: Optional[str] = None,
@@ -877,11 +888,12 @@ class FasterQwen3TTS:
             do_sample: Whether to sample
             repetition_penalty: Repetition penalty
             chunk_size: Codec steps per chunk (12 = ~1 second)
-            xvec_only: When True (default), use only the speaker embedding for voice cloning.
+            xvec_only: When True, use only the speaker embedding for voice cloning.
                 This prevents phoneme bleed-through from the reference and allows clean
-                language switching. Set to False for full ICL mode (reference audio in context).
-            non_streaming_mode: When True (default), prefill the full target text before
-                streaming decode. Set to False to feed text token-by-token during decode.
+                language switching. Default False to match upstream ICL behavior
+                (reference audio in context).
+            non_streaming_mode: Default False to match upstream text feeding during decode.
+                Set to True to prefill the full target text before streaming decode.
             parity_mode: When True, disables CUDA graphs and uses dynamic cache streaming.
             voice_clone_prompt: Optional precomputed voice clone prompt dict. When provided,
                 `xvec_only` is ignored and prompt extraction from `ref_audio` is skipped.
@@ -890,6 +902,7 @@ class FasterQwen3TTS:
                 `ref_text` is ignored for x-vector-only and required for ICL.
             instruct: Optional instruction to guide generation style/dialect (e.g.
                 "请用纯正广东话朗读"). Prepended as a user turn before the TTS assistant turn.
+                Experimental for x-vector-only voice cloning; prefer `xvec_only=False`.
 
         Yields:
             Tuple of (audio_chunk_numpy, sample_rate, timing_dict)

@@ -19,6 +19,7 @@ def _build_dummy_model():
     )
     base._build_assistant_text = lambda text: text
     base._build_ref_text = lambda text: text
+    base._build_instruct_text = lambda text: text
     base._tokenize_texts = lambda _texts: [torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=torch.long)]
 
     def _fail(*_args, **_kwargs):
@@ -58,6 +59,10 @@ def test_public_api_exposes_voice_clone_prompt_parameter():
     assert list(sig_stream.parameters).index("max_new_tokens") == 5
     assert list(sig_clone.parameters)[-1] == "voice_clone_prompt"
     assert list(sig_stream.parameters)[-1] == "voice_clone_prompt"
+    assert sig_clone.parameters["xvec_only"].default is False
+    assert sig_clone.parameters["non_streaming_mode"].default is False
+    assert sig_stream.parameters["xvec_only"].default is False
+    assert sig_stream.parameters["non_streaming_mode"].default is False
 
 
 def test_prepare_generation_uses_precomputed_xvec_prompt_without_prompt_extraction():
@@ -72,6 +77,23 @@ def test_prepare_generation_uses_precomputed_xvec_prompt_without_prompt_extracti
         voice_clone_prompt=_xvec_prompt(),
     )
     assert ref_codes is None
+
+
+def test_prepare_generation_warns_for_instruct_with_xvec_only(caplog):
+    model = _build_dummy_model()
+
+    with caplog.at_level("WARNING"):
+        model._prepare_generation(
+            text="hello",
+            ref_audio=None,
+            ref_text="",
+            language="English",
+            voice_clone_prompt=_xvec_prompt(),
+            instruct="Please speak very fast.",
+        )
+
+    assert "experimental" in caplog.text
+    assert "x-vector-only" in caplog.text
 
 
 def test_prepare_generation_rejects_missing_voice_clone_prompt_keys():
