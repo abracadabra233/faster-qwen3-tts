@@ -10,7 +10,7 @@ Usage:
       --language English
 
 Requires:
-    pip install "faster-qwen3-tts[playback]"
+    pip install sounddevice
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ import torch
 
 sys.path.insert(0, ".")
 
-from faster_qwen3_tts import FasterQwen3TTS, StreamPlayer
+from examples.audio import StreamPlayer
+from faster_qwen3_tts import FasterQwen3TTS
 
 
 def main():
@@ -49,7 +50,8 @@ def main():
         dtype=dtype_map[args.dtype],
     )
 
-    with StreamPlayer() as play:
+    play = StreamPlayer()
+    try:
         for audio_chunk, sr, timing in model.generate_voice_clone_streaming(
             text=args.text,
             language=args.language,
@@ -64,6 +66,8 @@ def main():
                 f"decode_ms={timing['decode_ms']:.0f}"
             )
             play(audio_chunk, sr)
+    finally:
+        play.close()
 
 
 if __name__ == "__main__":

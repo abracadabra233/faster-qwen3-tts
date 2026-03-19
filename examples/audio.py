@@ -1,4 +1,4 @@
-"""Queue-backed audio playback helper for streaming generation."""
+"""Audio helpers used by the local streaming examples."""
 
 from __future__ import annotations
 
@@ -10,18 +10,7 @@ import numpy as np
 
 
 class StreamPlayer:
-    """Play streaming audio chunks through one persistent output stream.
-
-    The instance is callable so README examples can use:
-
-        play = StreamPlayer()
-        play(audio_chunk, sr)
-        play.close()
-
-    The helper keeps an internal queue and feeds it into a single
-    ``sounddevice.OutputStream`` callback, which avoids gaps caused by calling
-    ``sounddevice.play()`` for each chunk independently.
-    """
+    """Play streaming audio chunks through one persistent output stream."""
 
     def __init__(self, *, channels: int = 1, dtype: str = "float32", max_queue_chunks: int = 0):
         self.channels = channels
@@ -40,8 +29,8 @@ class StreamPlayer:
             import sounddevice as sd
         except ImportError as exc:
             raise ImportError(
-                "StreamPlayer requires the optional 'sounddevice' package. "
-                "Install it with: pip install \"faster-qwen3-tts[playback]\""
+                "examples.audio.StreamPlayer requires the optional 'sounddevice' package. "
+                "Install it with: pip install sounddevice"
             ) from exc
         return sd
 
@@ -59,7 +48,6 @@ class StreamPlayer:
 
     def _callback(self, outdata, frames, _time, status):
         if status:
-            # Keep going; users can inspect the warning on stderr if needed.
             pass
 
         written = 0
@@ -122,9 +110,3 @@ class StreamPlayer:
 
         self._stream.close()
         self._stream = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.close(wait=exc is None)

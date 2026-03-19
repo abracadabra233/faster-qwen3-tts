@@ -17,7 +17,8 @@ pip install faster-qwen3-tts
 ### Python
 
 ```python
-from faster_qwen3_tts import FasterQwen3TTS, StreamPlayer
+from examples.audio import StreamPlayer  # helper from this repo's examples/
+from faster_qwen3_tts import FasterQwen3TTS
 
 model = FasterQwen3TTS.from_pretrained("Qwen/Qwen3-TTS-12Hz-0.6B-Base")
 ref_audio = "ref_audio.wav"
@@ -28,13 +29,16 @@ ref_text = (
 )
 
 # Streaming — yields audio chunks during generation
-with StreamPlayer() as play:
+play = StreamPlayer()
+try:
     for audio_chunk, sr, timing in model.generate_voice_clone_streaming(
         text="What do you mean that I'm not real?", language="English",
         ref_audio=ref_audio, ref_text=ref_text,
         chunk_size=8,  # 8 steps ≈ 667ms of audio per chunk
     ):
         play(audio_chunk, sr)
+finally:
+    play.close()
 
 # Non-streaming — returns all audio at once
 audio_list, sr = model.generate_voice_clone(
@@ -43,13 +47,13 @@ audio_list, sr = model.generate_voice_clone(
 )
 ```
 
-For local speaker playback, install the optional dependency first:
+For local speaker playback from a repo checkout with the example helper:
 
 ```bash
-pip install "faster-qwen3-tts[playback]"
+pip install sounddevice
 ```
 
-`StreamPlayer` keeps one output stream open and queues chunks into it. A one-shot player such as `sounddevice.play(audio_chunk, sr)` restarts playback per chunk and can introduce gaps. See [`examples/streaming_playback.py`](examples/streaming_playback.py) for a runnable example.
+`examples/audio.py` contains a small `StreamPlayer` helper used by [`examples/streaming_playback.py`](examples/streaming_playback.py). It keeps one output stream open and queues chunks into it. A one-shot player such as `sounddevice.play(audio_chunk, sr)` restarts playback per chunk and can introduce gaps.
 
 ### CLI
 
