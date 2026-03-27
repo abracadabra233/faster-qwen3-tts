@@ -799,6 +799,13 @@ body {
         <span class="sv" id="chunkV">8</span>
       </div>
     </div>
+    <div class="s-row">
+      <label>Text feed</label>
+      <div class="toggle">
+        <div class="tog on" data-nsm="0" onclick="setNonStreamingMode(false)">Step-by-step</div>
+        <div class="tog" data-nsm="1" onclick="setNonStreamingMode(true)">Prefill text</div>
+      </div>
+    </div>
 
     <div class="s-section">Sampling</div>
     <div class="s-grid3">
@@ -863,6 +870,7 @@ function setPlayBtns(disabled) {
 // ── State ─────────────────────────────────────────────────────────────────────
 let genMode  = 'stream';
 let xvecOnly = false;
+let nonStreamingMode = false;
 let busy     = false;
 let refFile  = null;
 let presetRefId = null;
@@ -942,6 +950,18 @@ function setMode(m) {
   document.querySelectorAll('.tog[data-m]').forEach(el =>
     el.classList.toggle('on', el.dataset.m === m));
   $('chunkRow').style.display = m === 'stream' ? '' : 'none';
+}
+function setNonStreamingMode(v) {
+  nonStreamingMode = v;
+  document.querySelectorAll('.tog[data-nsm]').forEach(el =>
+    el.classList.toggle('on', el.dataset.nsm === (v ? '1' : '0')));
+}
+function defaultNonStreamingModeForModel(modelId) {
+  return !!modelId && (modelId.includes('CustomVoice') || modelId.includes('VoiceDesign'));
+}
+function syncTextFeedDefault(modelId) {
+  if (!modelId) return;
+  setNonStreamingMode(defaultNonStreamingModeForModel(modelId));
 }
 function setXvec(v) {
   xvecOnly = v;
@@ -1039,6 +1059,7 @@ async function fetchStatus() {
       // Only trust loadedModel when the server confirms it's actually loaded
       loadedModel = d.model;
       $('modelSel').value = d.model;
+      syncTextFeedDefault(d.model);
     }
     populateSpeakers(d.speakers || []);
     renderPresetRefs(d.preset_refs || []);
@@ -1060,6 +1081,7 @@ async function loadModel() {
     if (d.status === 'loaded' || d.status === 'already_loaded') {
       loadedModel  = loadingModel;
       loadingModel = null;
+      syncTextFeedDefault(loadedModel);
       setPill('loaded', 'ready');
       fetchStatus();
     } else {
@@ -1594,6 +1616,7 @@ async function generate(mode) {
   fd.append('temperature',        $('tempSl').value);
   fd.append('top_k',              $('topkSl').value);
   fd.append('repetition_penalty', $('repSl').value);
+  fd.append('non_streaming_mode', nonStreamingMode ? 'true' : 'false');
 
   if (mode === 'voice_clone') {
     if (presetRefId) {

@@ -65,6 +65,18 @@ def test_public_api_exposes_voice_clone_prompt_parameter():
     assert sig_stream.parameters["non_streaming_mode"].default is False
 
 
+def test_public_api_matches_upstream_non_streaming_defaults():
+    sig_custom = inspect.signature(FasterQwen3TTS.generate_custom_voice)
+    sig_custom_stream = inspect.signature(FasterQwen3TTS.generate_custom_voice_streaming)
+    sig_design = inspect.signature(FasterQwen3TTS.generate_voice_design)
+    sig_design_stream = inspect.signature(FasterQwen3TTS.generate_voice_design_streaming)
+
+    assert sig_custom.parameters["non_streaming_mode"].default is True
+    assert sig_custom_stream.parameters["non_streaming_mode"].default is True
+    assert sig_design.parameters["non_streaming_mode"].default is True
+    assert sig_design_stream.parameters["non_streaming_mode"].default is True
+
+
 def test_prepare_generation_uses_precomputed_xvec_prompt_without_prompt_extraction():
     model = _build_dummy_model()
 

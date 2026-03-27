@@ -468,6 +468,7 @@ class FasterQwen3TTS:
         language: str,
         speaker: Optional[str],
         instruct: Optional[str] = None,
+        non_streaming_mode: bool = True,
     ):
         input_texts = [self.model._build_assistant_text(text)]
         input_ids = self.model._tokenize_texts(input_texts)
@@ -486,7 +487,7 @@ class FasterQwen3TTS:
             voice_clone_prompt=None,
             languages=[language] if language is not None else ["Auto"],
             speakers=[speaker],
-            non_streaming_mode=False,
+            non_streaming_mode=non_streaming_mode,
             instruct_ids=instruct_ids,
         )
 
@@ -1022,6 +1023,7 @@ class FasterQwen3TTS:
         speaker: str,
         language: str,
         instruct: Optional[str] = None,
+        non_streaming_mode: bool = True,
         max_new_tokens: int = 2048,
         min_new_tokens: int = 2,
         temperature: float = 0.9,
@@ -1046,6 +1048,7 @@ class FasterQwen3TTS:
             language=language,
             speaker=speaker,
             instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
         )
 
         codec_ids, timing = fast_generate(
@@ -1099,6 +1102,7 @@ class FasterQwen3TTS:
         speaker: str,
         language: str,
         instruct: Optional[str] = None,
+        non_streaming_mode: bool = True,
         max_new_tokens: int = 2048,
         min_new_tokens: int = 2,
         temperature: float = 0.9,
@@ -1124,6 +1128,7 @@ class FasterQwen3TTS:
             language=language,
             speaker=speaker,
             instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
         )
 
         speech_tokenizer = m.speech_tokenizer
@@ -1196,6 +1201,7 @@ class FasterQwen3TTS:
         text: str,
         instruct: str,
         language: str,
+        non_streaming_mode: bool = True,
         max_new_tokens: int = 2048,
         min_new_tokens: int = 2,
         temperature: float = 0.9,
@@ -1216,6 +1222,7 @@ class FasterQwen3TTS:
             language=language,
             speaker=None,
             instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
         )
 
         codec_ids, timing = fast_generate(
@@ -1268,6 +1275,7 @@ class FasterQwen3TTS:
         text: str,
         instruct: str,
         language: str,
+        non_streaming_mode: bool = True,
         max_new_tokens: int = 2048,
         min_new_tokens: int = 2,
         temperature: float = 0.9,
@@ -1289,6 +1297,7 @@ class FasterQwen3TTS:
             language=language,
             speaker=None,
             instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
         )
 
         speech_tokenizer = m.speech_tokenizer
