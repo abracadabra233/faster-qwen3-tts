@@ -956,6 +956,13 @@ function setNonStreamingMode(v) {
   document.querySelectorAll('.tog[data-nsm]').forEach(el =>
     el.classList.toggle('on', el.dataset.nsm === (v ? '1' : '0')));
 }
+function defaultNonStreamingModeForModel(modelId) {
+  return !!modelId && (modelId.includes('CustomVoice') || modelId.includes('VoiceDesign'));
+}
+function syncTextFeedDefault(modelId) {
+  if (!modelId) return;
+  setNonStreamingMode(defaultNonStreamingModeForModel(modelId));
+}
 function setXvec(v) {
   xvecOnly = v;
   document.querySelectorAll('.tog[data-x]').forEach(el =>
@@ -1052,6 +1059,7 @@ async function fetchStatus() {
       // Only trust loadedModel when the server confirms it's actually loaded
       loadedModel = d.model;
       $('modelSel').value = d.model;
+      syncTextFeedDefault(d.model);
     }
     populateSpeakers(d.speakers || []);
     renderPresetRefs(d.preset_refs || []);
@@ -1073,6 +1081,7 @@ async function loadModel() {
     if (d.status === 'loaded' || d.status === 'already_loaded') {
       loadedModel  = loadingModel;
       loadingModel = null;
+      syncTextFeedDefault(loadedModel);
       setPill('loaded', 'ready');
       fetchStatus();
     } else {
