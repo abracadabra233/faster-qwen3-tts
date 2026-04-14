@@ -1,0 +1,196 @@
+# ============================================================================
+# Dockerfile.jetson — faster-qwen3-tts on Jetson AGX Orin (JetPack 5.x)
+# ============================================================================
+#
+# 宿主机环境要求:
+#   Jetson AGX Orin, JetPack 5.1.x (L4T R35.x), Docker + nvidia-runtime
+#
+# 构建 (两种方式):
+#
+#   方式一 — 完整构建 (含 PyTorch 源码编译, 首次约 4-6 小时):
+#     mkdir -p wheels
+#     docker build --network=host -f Dockerfile.jetson -t faster-tts:jp5 .
+#
+#   方式二 — 使用预编译 wheel (构建过一次后可导出复用):
+#     id=$(docker create faster-tts:jp5)
+#     docker cp $id:/wheels/ ./wheels/
+#     docker rm $id
+#     docker build --network=host -f Dockerfile.jetson -t faster-tts:jp5 .
+#
+# 运行:
+#   docker run --runtime nvidia -it --rm \
+#     -v /media/data/models:/app/models \
+#     -p 8201:8201 \
+#     faster-tts:jp5
+#
+# ============================================================================
+
+FROM nvcr.nju.edu.cn/nvidia/l4t-jetpack:r35.4.1
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PYTORCH_TAG=v2.5.1
+ARG TORCHAUDIO_TAG=v2.5.1
+ARG MAX_JOBS=10
+
+# ── 1. 系统依赖 (仅 C/C++ 构建工具和库) ────────────────────────────────────
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build pkg-config \
+        git curl wget ca-certificates \
+        libsndfile1 libsndfile1-dev \
+        libopenblas-dev liblapack-dev \
+        libffi-dev libssl-dev libbz2-dev liblzma-dev \
+        libreadline-dev libsqlite3-dev zlib1g-dev \
+        libjpeg-dev libpng-dev \
+        sox libsox-dev \
+        ffmpeg libavformat-dev libavcodec-dev libavutil-dev libavdevice-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2. uv + Python 3.10 (venv 方式) ───────────────────────────────────────
+#
+# uv 自带 Python 版本管理, 直接拉 python-build-standalone 的 3.10.
+# 实测: standalone 自带 Python.h, libpython3.10.so (19MB shared),
+#        ssl/ctypes/sqlite3 全部 OK.
+#
+# 注意: uv 管理的 Python 不允许 --system 直接装包 (保护机制),
+# 所以用 uv venv 创建环境. 在 Docker 容器里 venv 等价于 system.
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+RUN uv python install 3.10
+RUN uv venv --python 3.10 /opt/venv
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# 让 cmake/linker 也能找到 standalone Python 的 libpython3.10.so
+RUN PY_LIBDIR=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") && \
+    echo "$PY_LIBDIR" > /etc/ld.so.conf.d/python310.conf && ldconfig
+
+# 配置 pip/uv 镜像: 阿里云
+ENV UV_INDEX_URL="https://mirrors.aliyun.com/pypi/simple/"
+ENV UV_COMPILE_BYTECODE=1
+RUN mkdir -p /root/.config/pip && \
+    printf '[global]\nindex-url = https://mirrors.aliyun.com/pypi/simple/\ntrusted-host = mirrors.aliyun.com\n' \
+    > /root/.config/pip/pip.conf
+
+RUN uv pip install pip setuptools wheel
+
+# ── 3. 升级 CUDA 11.4 → 11.8 ───────────────────────────────────────────────
+#
+# PyTorch ≥2.5 最低要求 CUDA 11.8; JetPack 5 默认 CUDA 11.4.
+# NVIDIA 提供 CUDA Upgradable Package, 可在不刷机的情况下升级.
+# 容器内 cuda-compat 包依赖 nvidia-l4t-core (BSP 包, 容器中不存在),
+# 采用 dusty-nv 的 workaround: 手动 ar/tar 解压 cuda-compat deb.
+#
+# Ref: https://developer.nvidia.com/blog/simplifying-cuda-upgrades-for-nvidia-jetson-users/
+
+RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/arm64/cuda-ubuntu2004.pin \
+        -O /etc/apt/preferences.d/cuda-repository-pin-600 && \
+    wget -q https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda-tegra-repo-ubuntu2004-11-8-local_11.8.0-1_arm64.deb && \
+    dpkg -i cuda-tegra-repo-ubuntu2004-11-8-local_11.8.0-1_arm64.deb && \
+    rm -f  cuda-tegra-repo-ubuntu2004-11-8-local_11.8.0-1_arm64.deb && \
+    cp /var/cuda-tegra-repo-*/cuda-tegra-*-keyring.gpg /usr/share/keyrings/
+
+RUN mkdir -p /tmp/_compat && cd /tmp/_compat && \
+    ar x /var/cuda-tegra-repo-ubuntu2004-11-8-local/cuda-compat-11-8_*.deb && \
+    tar xf data.tar.xz -C / && \
+    rm -rf /tmp/_compat
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends cuda-toolkit-11-8 && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV CUDA_HOME=/usr/local/cuda-11.8
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/compat:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+ENV TORCH_CUDA_ARCH_LIST="8.7"
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+
+# ── 4. PyTorch ──────────────────────────────────────────────────────────────
+#
+# wheels/ 目录有 torch*.whl → 直接装 (秒级).
+# 没有 → 从 GitHub 源码编译 (AGX Orin 12 核约 4-6 小时).
+# 编译好的 wheel 保存到 /wheels/, 可 docker cp 导出复用.
+
+RUN mkdir -p /wheels
+COPY wheels/ /wheels/
+
+RUN set -e; \
+    TORCH_FOUND=$(ls /wheels/torch-*.whl 2>/dev/null | head -1); \
+    if [ -n "$TORCH_FOUND" ]; then \
+        echo ">>> [torch] 检测到预编译 wheel: $TORCH_FOUND"; \
+        uv pip install "$TORCH_FOUND"; \
+    else \
+        echo ">>> [torch] 未检测到 wheel, 从源码编译 ${PYTORCH_TAG} ..."; \
+        uv pip install "cmake>=3.18" pyyaml typing-extensions "numpy<2" cffi; \
+        git clone --depth 1 --branch "${PYTORCH_TAG}" --recurse-submodules \
+            https://github.com/pytorch/pytorch.git /tmp/pytorch; \
+        cd /tmp/pytorch && pip install -r requirements.txt; \
+        USE_CUDA=1 USE_CUDNN=1 \
+        USE_NCCL=0 USE_DISTRIBUTED=0 USE_TENSORRT=0 USE_FBGEMM=0 USE_KINETO=0 \
+        BUILD_TEST=0 \
+        TORCH_CUDA_ARCH_LIST="8.7" \
+        CMAKE_BUILD_TYPE=Release \
+        MAX_JOBS="${MAX_JOBS}" \
+        CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        USE_PRIORITIZED_TEXT_FOR_LD=1 \
+            python3 setup.py bdist_wheel; \
+        cp dist/torch-*.whl /wheels/; \
+        uv pip install dist/torch-*.whl; \
+        rm -rf /tmp/pytorch; \
+    fi && \
+    python3 -c "import torch; print('PyTorch', torch.__version__, '| CUDA', torch.version.cuda)"
+
+# ── 5. torchaudio (qwen-tts 依赖) ──────────────────────────────────────────
+
+RUN set -e; \
+    TA_FOUND=$(ls /wheels/torchaudio-*.whl 2>/dev/null | head -1); \
+    if [ -n "$TA_FOUND" ]; then \
+        echo ">>> [torchaudio] 检测到预编译 wheel: $TA_FOUND"; \
+        uv pip install "$TA_FOUND"; \
+    else \
+        echo ">>> [torchaudio] 从源码编译 ${TORCHAUDIO_TAG} ..."; \
+        git clone --depth 1 --branch "${TORCHAUDIO_TAG}" --recurse-submodules \
+            https://github.com/pytorch/audio.git /tmp/audio; \
+        cd /tmp/audio && \
+        USE_CUDA=1 BUILD_SOX=0 \
+            pip install -v --no-build-isolation . && \
+        python3 setup.py bdist_wheel && \
+            cp dist/torchaudio-*.whl /wheels/ || true; \
+        rm -rf /tmp/audio; \
+    fi
+
+# ── 6. 安装项目 + Python 依赖 ───────────────────────────────────────────────
+
+WORKDIR /app
+COPY . /app/faster-qwen3-tts/
+
+RUN cd /app/faster-qwen3-tts && \
+    uv pip install -e ".[demo]" --no-deps && \
+    uv pip install \
+        "qwen-tts>=0.1.1" \
+        "transformers>=4.57" \
+        "accelerate>=1.12" \
+        "numpy<2" \
+        soundfile \
+        huggingface-hub \
+        "fastapi>=0.100.0" \
+        "uvicorn[standard]>=0.24.0" \
+        "python-multipart>=0.0.7" \
+        einops \
+        librosa \
+        onnxruntime \
+        safetensors
+
+# ── 7. 环境 + 入口 ──────────────────────────────────────────────────────────
+
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/app/models
+ENV MODELSCOPE_CACHE=/app/models
+
+WORKDIR /app/faster-qwen3-tts
+
+CMD ["python", "-m", "faster_qwen3_tts.cli", "--help"]

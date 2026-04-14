@@ -1,0 +1,106 @@
+# ============================================================================
+# docker-compose.yml — faster-qwen3-tts on Jetson AGX Orin
+# ============================================================================
+#
+# 用法 (注意: 用 "docker compose" 而非 "docker-compose", v1 有兼容性问题):
+#   docker compose run --rm test          # 快速测试 (CLI 生成一段语音)
+#   docker compose up serve               # OpenAI 兼容 API 服务 (8000)
+#   docker compose up demo                # Web UI 演示 (7860)
+#   docker compose run --rm shell         # 交互式 shell, 调试用
+#   docker compose run --rm benchmark     # 跑 benchmark
+#
+# 本地代码挂载到容器, 改完代码直接生效, 无需重新 build.
+# 模型缓存在 ./models/, 下载一次后复用.
+# ============================================================================
+
+version: "2.3"
+
+x-common: &common
+  image: faster-tts:jp5
+  runtime: nvidia
+  network_mode: host
+  working_dir: /app/faster-qwen3-tts
+  environment:
+    - NVIDIA_VISIBLE_DEVICES=all
+    - PYTHONUNBUFFERED=1
+    - HF_HOME=/app/models
+    - MODELSCOPE_CACHE=/app/models
+    - CUDA_HOME=/usr/local/cuda-11.8
+    - LD_LIBRARY_PATH=/usr/local/cuda-11.8/compat:/usr/local/cuda-11.8/lib64
+    - LD_PRELOAD=/opt/venv/lib/python3.10/site-packages/scikit_learn.libs/libgomp-947d5fa1.so.1.0.0
+  volumes:
+    # 挂载本地代码 → 改代码即时生效
+    - .:/app/faster-qwen3-tts
+    # 已下载的模型 (0.6B + Tokenizer)
+    - /media/data/wangxu/omni/tts/models:/app/models
+    # 输出文件 (生成的 wav 等)
+    - ./output:/app/output
+
+services:
+
+  # ── 快速测试: 生成一段语音 ────────────────────────────────────────────
+  # 包含 aarch64 workaround: speaker encoder warmup + 音频格式转换
+  test:
+    <<: *common
+    command: >
+      python scripts/tts_test.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, this is a test of the text to speech system."
+        --language English
+        --output /app/output/test_output.wav
+
+  # ── 中文测试 ──────────────────────────────────────────────────────────
+  test-zh:
+    <<: *common
+    command: >
+      python scripts/tts_test.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "大家好，我是一个运行在英伟达杰特森平台上的语音合成系统，很高兴认识你。"
+        --language Chinese
+        --output /app/output/test_output_zh.wav
+
+  # ── OpenAI 兼容 API 服务 ────────────────────────────────────────────────
+  # 启动后:
+  #   curl http://localhost:8000/v1/audio/speech \
+  #     -H "Content-Type: application/json" \
+  #     -d '{"input":"Hello world!","voice":"alloy","response_format":"wav"}' \
+  #     --output speech.wav
+  serve:
+    <<: *common
+    command: >
+      python examples/openai_server.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --ref-text "test reference audio"
+        --language English
+        --port 8000
+        --streaming
+    restart: unless-stopped
+
+  # ── Web UI 演示 (Gradio) ───────────────────────────────────────────────
+  # 启动后浏览器打开 http://<jetson-ip>:7860
+  demo:
+    <<: *common
+    command: >
+      python demo/server.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --port 7860
+    restart: unless-stopped
+
+  # ── 交互式 Shell (调试用) ──────────────────────────────────────────────
+  # docker-compose run --rm shell
+  # 进去后随便跑 python, 改代码, 测试
+  shell:
+    <<: *common
+    command: bash
+    stdin_open: true
+    tty: true
+
+  # ── Benchmark (CUDA Graph, 不跑 baseline) ──────────────────────────────
+  # docker compose run --rm benchmark
+  # 或指定模型: docker compose run --rm -e MODEL_SIZE=1.7B benchmark
+  benchmark:
+    <<: *common
+    command: python scripts/benchmark_jetson.py
