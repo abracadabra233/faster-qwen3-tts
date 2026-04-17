@@ -8,6 +8,7 @@
 #   docker compose up demo                # Web UI 演示 (7860)
 #   docker compose run --rm shell         # 交互式 shell, 调试用
 #   docker compose run --rm benchmark     # 跑 benchmark
+#   docker compose run --rm fa-shell bash -c 'python3 scripts/verify_flash_attn.py'
 #
 # 本地代码挂载到容器, 改完代码直接生效, 无需重新 build.
 # 模型缓存在 ./models/, 下载一次后复用.
@@ -15,11 +16,13 @@
 
 version: "2.3"
 
-x-common: &common
-  image: faster-tts:jp5
-  runtime: nvidia
-  network_mode: host
-  working_dir: /app/faster-qwen3-tts
+x-volumes: &volumes
+  volumes:
+    - .:/app/faster-qwen3-tts
+    - /media/data/wangxu/omni/tts/models:/app/models
+    - ./output:/app/output
+
+x-env: &env
   environment:
     - NVIDIA_VISIBLE_DEVICES=all
     - PYTHONUNBUFFERED=1
@@ -28,13 +31,21 @@ x-common: &common
     - CUDA_HOME=/usr/local/cuda-11.8
     - LD_LIBRARY_PATH=/usr/local/cuda-11.8/compat:/usr/local/cuda-11.8/lib64
     - LD_PRELOAD=/opt/venv/lib/python3.10/site-packages/scikit_learn.libs/libgomp-947d5fa1.so.1.0.0
-  volumes:
-    # 挂载本地代码 → 改代码即时生效
-    - .:/app/faster-qwen3-tts
-    # 已下载的模型 (0.6B + Tokenizer)
-    - /media/data/wangxu/omni/tts/models:/app/models
-    # 输出文件 (生成的 wav 等)
-    - ./output:/app/output
+
+x-common: &common
+  image: faster-tts:jp5
+  runtime: nvidia
+  network_mode: host
+  working_dir: /app/faster-qwen3-tts
+  <<: [*env, *volumes]
+
+# Flash Attention 版本 (需先 build: docker build -f Dockerfile.jetson-fa -t faster-tts:jp5-fa .)
+x-common-fa: &common-fa
+  image: faster-tts:jp5-fa
+  runtime: nvidia
+  network_mode: host
+  working_dir: /app/faster-qwen3-tts
+  <<: [*env, *volumes]
 
 services:
 
@@ -104,3 +115,31 @@ services:
   benchmark:
     <<: *common
     command: python scripts/benchmark_jetson.py
+
+  # ========================================================================
+  # Flash Attention 版本 (image: faster-tts:jp5-fa)
+  # 构建: docker build --network=host -f Dockerfile.jetson-fa -t faster-tts:jp5-fa .
+  # ========================================================================
+
+  # ── FA 测试 ────────────────────────────────────────────────────────────
+  fa-test:
+    <<: *common-fa
+    command: >
+      python scripts/tts_test.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, this is a flash attention test."
+        --language English
+        --output /app/output/test_fa.wav
+
+  # ── FA Benchmark (对比 eager vs flash_attention_2) ─────────────────────
+  fa-benchmark:
+    <<: *common-fa
+    command: python scripts/benchmark_jetson.py
+
+  # ── FA Shell ───────────────────────────────────────────────────────────
+  fa-shell:
+    <<: *common-fa
+    command: bash
+    stdin_open: true
+    tty: true

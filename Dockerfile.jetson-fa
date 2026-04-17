@@ -1,0 +1,54 @@
+# ============================================================================
+# Dockerfile.jetson-fa — faster-qwen3-tts + Flash Attention 2 on Jetson Orin
+# ============================================================================
+#
+# 基于已构建的 faster-tts:jp5 镜像, 增加 Flash Attention 2 源码编译.
+# flash-attn 编译约 30-60 分钟 (AGX Orin 12 核).
+#
+# 构建:
+#   docker build --network=host -f Dockerfile.jetson-fa -t faster-tts:jp5-fa .
+#
+# 或使用预编译 wheel (编译一次后导出复用):
+#   id=$(docker create faster-tts:jp5-fa)
+#   docker cp $id:/wheels/flash_attn*.whl ./wheels/
+#   docker rm $id
+#   # 重新构建 (秒级):
+#   docker build --network=host -f Dockerfile.jetson-fa -t faster-tts:jp5-fa .
+#
+# ============================================================================
+
+FROM faster-tts:jp5
+
+ARG MAX_JOBS=4
+ARG FLASH_ATTN_TAG=v2.7.4
+
+ENV TORCH_CUDA_ARCH_LIST="8.7"
+ENV FLASH_ATTENTION_FORCE_BUILD=TRUE
+ENV FLASH_ATTENTION_SKIP_CUDA_BUILD=FALSE
+ENV FLASH_ATTN_CUDA_ARCHS="87"
+
+# ── Flash Attention 2 from source ──────────────────────────────────────────
+#
+# SM 8.7 (Orin) 与 SM 8.6 共享相同的 kernel, flash-attn 原生支持.
+# 但 setup.py 默认不生成 sm_87 code, 需要通过环境变量指定.
+# 编译约 30-60 分钟 (大量 CUDA kernel 模板实例化).
+
+RUN set -e; \
+    FA_FOUND=$(ls /wheels/flash_attn*.whl 2>/dev/null | head -1); \
+    if [ -n "$FA_FOUND" ]; then \
+        echo ">>> [flash-attn] 检测到预编译 wheel: $FA_FOUND"; \
+        uv pip install "$FA_FOUND"; \
+    else \
+        echo ">>> [flash-attn] 从源码编译 ${FLASH_ATTN_TAG} (约 30-60 分钟)..."; \
+        uv pip install packaging ninja; \
+        git clone --depth 1 --branch "${FLASH_ATTN_TAG}" \
+            https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attn; \
+        cd /tmp/flash-attn; \
+        TORCH_CUDA_ARCH_LIST="8.7" \
+        MAX_JOBS="${MAX_JOBS}" \
+            python3 setup.py bdist_wheel; \
+        cp dist/flash_attn*.whl /wheels/; \
+        uv pip install dist/flash_attn*.whl; \
+        rm -rf /tmp/flash-attn; \
+    fi && \
+    python3 -c "import flash_attn; print('flash-attn', flash_attn.__version__)"
