@@ -1,0 +1,37 @@
+# ============================================================================
+# Dockerfile.jetson-ao-gemv — dp4a INT8 GEMV kernel on Jetson AGX Orin
+# ============================================================================
+#
+# 基于 faster-tts:jp5-ao 镜像, 编译安装自定义 dp4a INT8 GEMV CUDA 扩展.
+# 该扩展为 BS=1 自回归解码提供高效 INT8 GEMV, 替代 torch._int_mm 的
+# padding 到 M=32 方案.
+#
+# 构建:
+#   docker build --network=host -f Dockerfile.jetson-ao-gemv -t faster-tts:jp5-ao-gemv .
+#
+# 编译时间: ~1-2 分钟 (AGX Orin)
+# ============================================================================
+
+ARG BASE_IMAGE=faster-tts:jp5-ao
+FROM ${BASE_IMAGE}
+
+ENV TORCH_CUDA_ARCH_LIST="8.7"
+
+# ── 编译 int8_gemv CUDA 扩展 ─────────────────────────────────────────────
+COPY csrc/ /tmp/csrc/
+
+RUN cd /tmp/csrc && \
+    python3 setup.py install && \
+    rm -rf /tmp/csrc
+
+# ── 验证 ──────────────────────────────────────────────────────────────────
+RUN cd / && python3 -c "\
+import torch; \
+import int8_gemv_cuda; \
+assert hasattr(int8_gemv_cuda, 'int8_gemv'), 'missing int8_gemv'; \
+assert hasattr(int8_gemv_cuda, 'int8_gemv_v2'), 'missing int8_gemv_v2'; \
+assert hasattr(int8_gemv_cuda, 'fused_w8a8_gemv'), 'missing fused_w8a8_gemv'; \
+assert hasattr(int8_gemv_cuda, 'quantize_bf16_to_int8'), 'missing quantize_bf16_to_int8'; \
+assert hasattr(int8_gemv_cuda, 'dequant_int32_to_bf16'), 'missing dequant_int32_to_bf16'; \
+print('int8_gemv_cuda: OK — v1+v2+fused+quant+dequant all loaded'); \
+"

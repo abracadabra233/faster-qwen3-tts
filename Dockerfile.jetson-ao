@@ -1,0 +1,98 @@
+# ============================================================================
+# Dockerfile.jetson-ao — faster-qwen3-tts + torchao W8A8 on Jetson Orin
+# ============================================================================
+#
+# 基于已构建的 faster-tts:jp5 镜像, 增加 torchao 源码编译.
+# torchao 的 CUDA 扩展编译约 10-30 分钟 (AGX Orin 12 核).
+#
+# 构建:
+#   docker build --network=host -f Dockerfile.jetson-ao -t faster-tts:jp5-ao .
+#
+# 或使用预编译 wheel (编译一次后导出复用):
+#   id=$(docker create faster-tts:jp5-ao)
+#   docker cp $id:/wheels/torchao*.whl ./wheels/
+#   docker rm $id
+#   # 重新构建 (秒级):
+#   docker build --network=host -f Dockerfile.jetson-ao -t faster-tts:jp5-ao .
+#
+# 也可以叠加 Flash Attention (基于 jp5-fa):
+#   docker build --network=host \
+#     --build-arg BASE_IMAGE=faster-tts:jp5-fa \
+#     -f Dockerfile.jetson-ao -t faster-tts:jp5-fa-ao .
+#
+# ============================================================================
+
+ARG BASE_IMAGE=faster-tts:jp5
+FROM ${BASE_IMAGE}
+
+ARG MAX_JOBS=10
+ARG TORCHAO_TAG=v0.12.0
+
+ENV TORCH_CUDA_ARCH_LIST="8.7"
+
+# ── torchao from source ───────────────────────────────────────────────────
+#
+# torchao v0.12.0 支持 PyTorch 2.5.x (Python API).
+# CUDA 扩展提供额外的量化 kernel (INT8 GEMM, CUTLASS 等).
+# 在 Jetson SM 8.7 / CUDA 11.8 上:
+#   - 基础 CUDA kernel (.cu) 可以正常编译
+#   - SM90a/SM100a CUTLASS kernel 不会编译 (需要 CUDA 12.6+, 自动跳过)
+#   - W8A8 核心功能依赖 torch._int_mm (PyTorch 内置, 无需额外 kernel)
+#
+# 已知问题: torchao v0.12.0 的 float8 模块无条件 import torch.distributed,
+# 但 Jetson 的 PyTorch 以 USE_DISTRIBUTED=0 编译 (不需要多卡).
+# 构建前需要 patch 源码, 安装后需要 patch site-packages.
+
+RUN set -e; \
+    AO_FOUND=$(ls /wheels/torchao*.whl 2>/dev/null | head -1); \
+    if [ -n "$AO_FOUND" ]; then \
+        echo ">>> [torchao] 检测到预编译 wheel: $AO_FOUND"; \
+        uv pip install "$AO_FOUND"; \
+    else \
+        echo ">>> [torchao] 从源码编译 ${TORCHAO_TAG} ..."; \
+        uv pip install packaging ninja; \
+        git clone --depth 1 --branch "${TORCHAO_TAG}" --recurse-submodules \
+            https://github.com/pytorch/ao.git /tmp/torchao; \
+        cd /tmp/torchao; \
+        \
+        echo ">>> [torchao] 尝试编译 CUDA 扩展 ..."; \
+        if USE_CPP=1 \
+           TORCH_CUDA_ARCH_LIST="8.7" \
+           MAX_JOBS="${MAX_JOBS}" \
+           python3 setup.py bdist_wheel 2>&1; then \
+            echo ">>> [torchao] CUDA 扩展编译成功"; \
+        else \
+            echo ">>> [torchao] CUDA 扩展编译失败, 回退到 Python-only 模式 ..."; \
+            rm -rf build dist *.egg-info; \
+            USE_CPP=0 \
+                python3 setup.py bdist_wheel; \
+        fi; \
+        \
+        cp dist/torchao*.whl /wheels/; \
+        uv pip install dist/torchao*.whl; \
+        rm -rf /tmp/torchao; \
+    fi
+
+# ── Patch: 修复 torch.distributed 缺失问题 ──────────────────────────────
+#
+# PyTorch (Jetson) 以 USE_DISTRIBUTED=0 编译, torch._C._distributed_c10d 不存在.
+# torchao v0.12.0 的 import 链:
+#   torchao → quantization → autoquant → dtypes → floatx → float8
+#   → float8_linear → distributed_utils → torch.distributed → FAIL
+#
+# float8 (FP8) 在 Jetson SM 8.7 上不可用 (需要 SM 8.9+), 直接跳过即可.
+# 对 W8A8 INT8 量化无影响.
+
+COPY ao/patch_torchao_jetson.py /tmp/patch_torchao_jetson.py
+RUN cd / && python3 /tmp/patch_torchao_jetson.py && rm /tmp/patch_torchao_jetson.py
+
+# ── 验证 ──────────────────────────────────────────────────────────────────
+
+RUN cd / && python3 -c "\
+import torchao; \
+print('torchao', torchao.__version__); \
+from torchao.quantization import int8_dynamic_activation_int8_weight; \
+print('W8A8 API: OK'); \
+import torch; \
+print('torch._int_mm available:', hasattr(torch, '_int_mm')); \
+"

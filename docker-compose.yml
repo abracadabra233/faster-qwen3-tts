@@ -3,12 +3,32 @@
 # ============================================================================
 #
 # 用法 (注意: 用 "docker compose" 而非 "docker-compose", v1 有兼容性问题):
-#   docker compose run --rm test          # 快速测试 (CLI 生成一段语音)
-#   docker compose up serve               # OpenAI 兼容 API 服务 (8000)
-#   docker compose up demo                # Web UI 演示 (7860)
-#   docker compose run --rm shell         # 交互式 shell, 调试用
-#   docker compose run --rm benchmark     # 跑 benchmark
-#   docker compose run --rm fa-shell bash -c 'python3 scripts/verify_flash_attn.py'
+#   docker compose run --rm test              # BF16 快速测试
+#   docker compose up serve                   # OpenAI 兼容 API 服务 (8000)
+#   docker compose up demo                    # Web UI 演示 (7860)
+#   docker compose run --rm shell             # 交互式 shell
+#   docker compose run --rm benchmark         # BF16 benchmark
+#
+# torchao 量化版本 (image: faster-tts:jp5-ao):
+#   docker compose run --rm ao-test-w8a8      # W8A8 动态量化测试
+#   docker compose run --rm ao-test-sq        # SmoothQuant 量化测试
+#   docker compose run --rm ao-benchmark      # BF16 vs W8A8 vs SmoothQuant 对比
+#   docker compose run --rm ao-shell          # 量化版交互式 shell
+#
+# dp4a INT8 GEMV 加速版 (image: faster-tts:jp5-ao-gemv):
+#   docker compose run --rm gemv-kernel-test  # dp4a kernel 正确性 + 微测试
+#   docker compose run --rm gemv-test-w8a8    # W8A8 + GEMV 端到端 TTS 测试
+#   docker compose run --rm gemv-benchmark    # BF16 vs W8A8 vs W8A8+GEMV 对比
+#   docker compose run --rm gemv-shell        # GEMV 交互式 shell
+#
+# Fused W8A8 GEMV V2 (image: faster-tts:jp5-ao-gemv):
+#   docker compose run --rm fused-correctness       # v2 kernel 正确性
+#   docker compose run --rm fused-correctness-fused  # fused kernel 正确性
+#   docker compose run --rm fused-cuda-graph         # fused CUDA Graph 兼容性
+#   docker compose run --rm fused-micro-bench        # BF16 vs v1 vs v2 vs fused 微 bench
+#   docker compose run --rm fused-test-w8a8          # fused W8A8 端到端 TTS 测试
+#   docker compose run --rm fused-benchmark          # BF16 vs W8A8 vs GEMV vs Fused 对比
+#   docker compose run --rm fused-integration        # fused 集成测试
 #
 # 本地代码挂载到容器, 改完代码直接生效, 无需重新 build.
 # 模型缓存在 ./models/, 下载一次后复用.
@@ -39,9 +59,19 @@ x-common: &common
   working_dir: /app/faster-qwen3-tts
   <<: [*env, *volumes]
 
-# Flash Attention 版本 (需先 build: docker build -f Dockerfile.jetson-fa -t faster-tts:jp5-fa .)
-x-common-fa: &common-fa
-  image: faster-tts:jp5-fa
+# torchao W8A8 量化版本
+# 构建: docker build --network=host -f Dockerfile.jetson-ao -t faster-tts:jp5-ao .
+x-common-ao: &common-ao
+  image: faster-tts:jp5-ao
+  runtime: nvidia
+  network_mode: host
+  working_dir: /app/faster-qwen3-tts
+  <<: [*env, *volumes]
+
+# dp4a INT8 GEMV 加速版
+# 构建: docker build --network=host -f Dockerfile.jetson-ao-gemv -t faster-tts:jp5-ao-gemv .
+x-common-ao-gemv: &common-ao-gemv
+  image: faster-tts:jp5-ao-gemv
   runtime: nvidia
   network_mode: host
   working_dir: /app/faster-qwen3-tts
@@ -49,8 +79,11 @@ x-common-fa: &common-fa
 
 services:
 
+  # ========================================================================
+  # BF16 基线 (image: faster-tts:jp5)
+  # ========================================================================
+
   # ── 快速测试: 生成一段语音 ────────────────────────────────────────────
-  # 包含 aarch64 workaround: speaker encoder warmup + 音频格式转换
   test:
     <<: *common
     command: >
@@ -73,11 +106,6 @@ services:
         --output /app/output/test_output_zh.wav
 
   # ── OpenAI 兼容 API 服务 ────────────────────────────────────────────────
-  # 启动后:
-  #   curl http://localhost:8000/v1/audio/speech \
-  #     -H "Content-Type: application/json" \
-  #     -d '{"input":"Hello world!","voice":"alloy","response_format":"wav"}' \
-  #     --output speech.wav
   serve:
     <<: *common
     command: >
@@ -91,7 +119,6 @@ services:
     restart: unless-stopped
 
   # ── Web UI 演示 (Gradio) ───────────────────────────────────────────────
-  # 启动后浏览器打开 http://<jetson-ip>:7860
   demo:
     <<: *common
     command: >
@@ -100,46 +127,371 @@ services:
         --port 7860
     restart: unless-stopped
 
-  # ── 交互式 Shell (调试用) ──────────────────────────────────────────────
-  # docker-compose run --rm shell
-  # 进去后随便跑 python, 改代码, 测试
+  # ── 交互式 Shell ──────────────────────────────────────────────────────
   shell:
     <<: *common
     command: bash
     stdin_open: true
     tty: true
 
-  # ── Benchmark (CUDA Graph, 不跑 baseline) ──────────────────────────────
-  # docker compose run --rm benchmark
-  # 或指定模型: docker compose run --rm -e MODEL_SIZE=1.7B benchmark
+  # ── Benchmark (BF16 CUDA Graph) ──────────────────────────────────────
   benchmark:
     <<: *common
     command: python scripts/benchmark_jetson.py
 
   # ========================================================================
-  # Flash Attention 版本 (image: faster-tts:jp5-fa)
-  # 构建: docker build --network=host -f Dockerfile.jetson-fa -t faster-tts:jp5-fa .
+  # torchao W8A8 量化版本 (image: faster-tts:jp5-ao)
+  # 构建: docker build --network=host -f Dockerfile.jetson-ao -t faster-tts:jp5-ao .
   # ========================================================================
 
-  # ── FA 测试 ────────────────────────────────────────────────────────────
-  fa-test:
-    <<: *common-fa
+  # ── W8A8 动态量化测试 ────────────────────────────────────────────────
+  # 无需 calibration, 直接量化推理
+  ao-test-w8a8:
+    <<: *common-ao
     command: >
-      python scripts/tts_test.py
+      python scripts/tts_test_ao.py
+        --quantize w8a8
         --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
         --ref-audio ref_audio.wav
-        --text "Hello, this is a flash attention test."
+        --text "Hello, this is a W8A8 quantized test on Jetson."
         --language English
-        --output /app/output/test_fa.wav
+        --output /app/output/test_w8a8.wav
 
-  # ── FA Benchmark (对比 eager vs flash_attention_2) ─────────────────────
-  fa-benchmark:
-    <<: *common-fa
-    command: python scripts/benchmark_jetson.py
+  # ── SmoothQuant 量化测试 ────────────────────────────────────────────
+  # 先用 calibration 数据计算 smoothing scales, 再量化推理
+  ao-test-sq:
+    <<: *common-ao
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize smoothquant
+        --alpha 0.5
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, this is a SmoothQuant quantized test on Jetson."
+        --language English
+        --output /app/output/test_smoothquant.wav
 
-  # ── FA Shell ───────────────────────────────────────────────────────────
-  fa-shell:
-    <<: *common-fa
+  # ── W8A8 中文测试 ───────────────────────────────────────────────────
+  ao-test-w8a8-zh:
+    <<: *common-ao
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize w8a8
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "大家好，这是一个在杰特森上运行的 INT8 量化语音合成测试。"
+        --language Chinese
+        --output /app/output/test_w8a8_zh.wav
+
+  # ── AO Benchmark: BF16 vs W8A8 vs SmoothQuant ───────────────────────
+  # 自动依次加载模型, 量化, benchmark, 输出对比表
+  ao-benchmark:
+    <<: *common-ao
+    command: >
+      python scripts/benchmark_ao.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --runs 3
+        --strategies bf16 w8a8 smoothquant
+
+  # ── 只跑 BF16 vs W8A8 (跳过 SmoothQuant, 更快) ─────────────────────
+  ao-benchmark-quick:
+    <<: *common-ao
+    command: >
+      python scripts/benchmark_ao.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --runs 3
+        --strategies bf16 w8a8
+
+  # ── AO Shell ─────────────────────────────────────────────────────────
+  ao-shell:
+    <<: *common-ao
     command: bash
     stdin_open: true
     tty: true
+
+  # ========================================================================
+  # dp4a INT8 GEMV 加速版 (image: faster-tts:jp5-ao-gemv)
+  # 构建: docker build --network=host -f Dockerfile.jetson-ao-gemv -t faster-tts:jp5-ao-gemv .
+  # ========================================================================
+
+  # ── dp4a Kernel 正确性/微测试 ──────────────────────────────────────
+  gemv-kernel-test:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test correctness
+
+  # ── dp4a Kernel 微 Benchmark ──────────────────────────────────────
+  gemv-micro-bench:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test benchmark
+
+  # ── CUDA Graph 兼容性测试 ─────────────────────────────────────────
+  gemv-cuda-graph-test:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test cuda-graph
+
+  # ── W8A8 + GEMV 端到端测试 ────────────────────────────────────────
+  gemv-test-w8a8:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize w8a8
+        --enable-gemv-patch
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, this is a W8A8 GEMV quantized test on Jetson."
+        --language English
+        --output /app/output/test_w8a8_gemv.wav
+
+  # ── W8A8 + GEMV 中文测试 ─────────────────────────────────────────
+  gemv-test-w8a8-zh:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize w8a8
+        --enable-gemv-patch
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "大家好，这是 dp4a INT8 GEMV 加速版语音合成，运行在杰特森上。"
+        --language Chinese
+        --output /app/output/test_w8a8_gemv_zh.wav
+
+  # ── Benchmark: BF16 vs W8A8 vs W8A8+GEMV ──────────────────────────
+  gemv-benchmark:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/benchmark_ao.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --runs 3
+        --strategies bf16 w8a8 w8a8_gemv
+
+  # ── GEMV 全部测试 (correctness + benchmark + cuda-graph + integration) ──
+  gemv-test-all:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test all
+
+  # ── GEMV Shell ──────────────────────────────────────────────────────
+  gemv-shell:
+    <<: *common-ao-gemv
+    command: bash
+    stdin_open: true
+    tty: true
+
+  # ========================================================================
+  # Fused W8A8 GEMV V2 (image: faster-tts:jp5-ao-gemv)
+  # 单 kernel 融合: BF16 -> INT8 quant -> dp4a -> dequant -> BF16
+  # ========================================================================
+
+  # ── v2 kernel 正确性测试 ──────────────────────────────────────────
+  fused-correctness:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test correctness-v2
+
+  # ── fused kernel 正确性测试 ────────────────────────────────────────
+  fused-correctness-fused:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test correctness-fused
+
+  # ── fused kernel CUDA Graph 兼容性 ────────────────────────────────
+  fused-cuda-graph:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test cuda-graph-fused
+
+  # ── 全量微 Benchmark: BF16 vs v1 vs v2 vs fused ──────────────────
+  fused-micro-bench:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test benchmark
+
+  # ── Fused W8A8 端到端 TTS 测试 ──────────────────────────────────
+  fused-test-w8a8:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize fused_w8a8
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, this is a fused INT8 GEMV test. One kernel per linear layer."
+        --language English
+        --output /app/output/test_fused_w8a8.wav
+
+  # ── Fused W8A8 中文测试 ─────────────────────────────────────────
+  fused-test-w8a8-zh:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize fused_w8a8
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "大家好，这是融合 INT8 量化加速版语音合成，每个线性层只需一个 CUDA 核函数。"
+        --language Chinese
+        --output /app/output/test_fused_w8a8_zh.wav
+
+  # ── 完整 Benchmark: BF16 vs W8A8 vs W8A8+GEMV vs Fused W8A8 ───
+  fused-benchmark:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/benchmark_ao.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --runs 3
+        --strategies bf16 w8a8 w8a8_gemv fused_w8a8
+
+  # ── Fused 集成测试 ────────────────────────────────────────────────
+  fused-integration:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test integration-fused
+
+  # ========================================================================
+  # V3 Pipeline (custom quant + v2 GEMV + custom dequant, 3 kernels/Linear)
+  # ========================================================================
+
+  # ── v3 pipeline 正确性测试 ─────────────────────────────────────
+  v3-correctness:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test correctness-v3
+
+  # ── v3 CUDA Graph 兼容性 + 延迟测试 ───────────────────────────
+  v3-cuda-graph:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test cuda-graph-v3
+
+  # ── v3 微 Benchmark: 所有方案对比 ─────────────────────────────
+  v3-micro-bench:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/test_int8_gemv.py --test benchmark
+
+  # ── v3 端到端 TTS 测试 (使用默认 v3_pipeline backend) ─────────
+  v3-test-w8a8:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize fused_w8a8
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, this is v3 pipeline. Three CUDA kernels per linear layer."
+        --language English
+        --output /app/output/test_v3_w8a8.wav
+
+  # ── v3 完整 Benchmark: BF16 vs Fused(v2) vs Fused(v3) ────────
+  v3-benchmark:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/benchmark_ao.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --runs 3
+        --strategies bf16 fused_w8a8
+
+  # ========================================================================
+  # V1/V2/V3 集成测试 — 输出到 output/ao/
+  #   docker compose run --rm ao-test-bf16-en
+  #   docker compose run --rm ao-test-v1-en
+  #   docker compose run --rm ao-test-v2-en
+  #   docker compose run --rm ao-test-v3-en
+  # ========================================================================
+
+  ao-test-bf16-en:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, I am a text to speech system running on NVIDIA Jetson. This is the BF16 baseline without any quantization."
+        --language English
+        --output /app/output/ao/bf16_en.wav
+
+  ao-test-bf16-zh:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "大家好，我是运行在杰特森上的语音合成系统，这是未量化的原始精度基线测试。"
+        --language Chinese
+        --output /app/output/ao/bf16_zh.wav
+
+  ao-test-v1-en:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize w8a8
+        --enable-gemv-patch
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, I am a text to speech system running on NVIDIA Jetson. This is version one, using dp4a GEMV kernel with monkey patch."
+        --language English
+        --output /app/output/ao/v1_gemv_en.wav
+
+  ao-test-v1-zh:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize w8a8
+        --enable-gemv-patch
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "大家好，这是第一版优化，使用自定义的 dp4a 整数向量乘加速核函数。"
+        --language Chinese
+        --output /app/output/ao/v1_gemv_zh.wav
+
+  ao-test-v2-en:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize fused_w8a8
+        --backend v2_pipeline
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, I am a text to speech system running on NVIDIA Jetson. This is version two, with vectorized loads and fused int8 linear layers."
+        --language English
+        --output /app/output/ao/v2_fused_en.wav
+
+  ao-test-v2-zh:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize fused_w8a8
+        --backend v2_pipeline
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "大家好，这是第二版优化，使用一百二十八位向量化加载和融合线性层替换。"
+        --language Chinese
+        --output /app/output/ao/v2_fused_zh.wav
+
+  ao-test-v3-en:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize fused_w8a8
+        --backend v3_pipeline
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "Hello, I am a text to speech system running on NVIDIA Jetson. This is version three, with custom quantize and dequantize CUDA kernels."
+        --language English
+        --output /app/output/ao/v3_pipeline_en.wav
+
+  ao-test-v3-zh:
+    <<: *common-ao-gemv
+    command: >
+      python scripts/tts_test_ao.py
+        --quantize fused_w8a8
+        --backend v3_pipeline
+        --model /app/models/Qwen3-TTS-12Hz-0.6B-Base
+        --ref-audio ref_audio.wav
+        --text "大家好，这是第三版优化，使用自定义量化反量化核函数，每层只需三次调用。"
+        --language Chinese
+        --output /app/output/ao/v3_pipeline_zh.wav
